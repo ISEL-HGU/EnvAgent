@@ -2,6 +2,17 @@
 
 Automatic Conda environment.yml generator that analyzes local project directories using AI-powered dependency analysis with **automatic error fixing**.
 
+## Architecture
+
+![EnvAgent Architecture](architecture.png)
+
+EnvAgent uses a three-agent architecture with an intelligent retry loop:
+1. **ProjectAnalyzer** - Analyzes project files and extracts dependencies using GPT-4
+2. **EnvironmentBuilder** - Generates valid Conda environment.yml files
+3. **EnvironmentFixer** - Automatically diagnoses and fixes Conda errors with up to 5 retry attempts
+
+The system uses a shared Memory component to pass analysis results between agents and track error history for intelligent fixes.
+
 ## Features
 
 - 🔍 Analyzes Python projects to detect dependencies
