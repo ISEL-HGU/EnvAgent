@@ -17,6 +17,7 @@ class EnvironmentFixer:
     """Fixes conda environment errors using AI."""
 
     FIX_PROMPT = """You are a Conda environment.yml fixer. A conda environment creation FAILED.
+Your goal is to fix the error by relaxing constraints, NOT by removing essential packages.
 
 ## CURRENT environment.yml:
 {current_yml}
@@ -27,37 +28,32 @@ class EnvironmentFixer:
 ## PREVIOUS FIX ATTEMPTS:
 {error_history}
 
+## 🚨 CRITICAL STRATEGY (FOLLOW THIS ORDER):
+
+1. **Dependency Conflicts / UnsatisfiableError / Pip failed:**
+   - **PRIMARY SOLUTION:** REMOVE STRICT VERSION CONSTRAINTS.
+   - Change `package==1.2.3` to just `package`.
+   - Change `package>=1.0` to just `package`.
+   - **Reasoning:** Let Conda/Pip resolve the compatible versions. Do NOT guess new version numbers.
+
+2. **PackagesNotFoundError:**
+   - First, remove the version constraint.
+   - If that fails, check if the package belongs in the `pip:` section.
+   - Only remove the package if it looks non-essential (e.g., plotting tools, linters).
+
+3. **"transformers" or "tokenizers" or "protobuf" Errors:**
+   - These are notorious for conflicts. REMOVE their version numbers immediately.
+   - Example: `transformers==4.30.0` -> `transformers`
+
+4. **CUDA/GPU Issues:**
+   - Ensure `channels` includes `- nvidia` if `cudatoolkit` or `cudnn` is used.
+   - Remove versions for `cudnn` and `cudatoolkit`.
+
 ## YOUR TASK:
-You MUST fix the error by modifying the YAML. DO NOT return it unchanged.
-
-### Common fixes for specific errors:
-
-**"PackagesNotFoundError" or "package not found":**
-- REMOVE the package entirely if not essential
-- OR change version (try removing version constraint)
-- OR move to pip section instead of conda
-
-**"cudnn" or "cudatoolkit" not found:**
-- FIRST: Check if nvidia channel is in channels section - if not, add "- nvidia" as FIRST channel
-- SECOND: Change cudnn from exact version (e.g., cudnn=8.6) to flexible version (cudnn>=8.0)
-- THIRD: If still failing, try just "cudnn" without any version
-- LAST RESORT: Remove cudnn line entirely (cudatoolkit often includes cuDNN)
-
-**"UnsatisfiableError" or version conflict:**
-- Remove specific version constraints (e.g., ==1.0.0 → no version)
-- Remove one of the conflicting packages
-- Downgrade package versions
-
-**Platform-specific error:**
-- Remove the package that's not available on this platform
-
-## CRITICAL RULES:
-1. You MUST make changes - do NOT return unchanged YAML
-2. When in doubt, REMOVE the problematic package
-3. Return ONLY the fixed YAML, no explanations
-4. Do NOT use markdown code blocks (no ```)
-
-## FIXED environment.yml (MUST BE DIFFERENT):
+Return the FIXED YAML.
+- DO NOT return the same YAML.
+- DO NOT use markdown code blocks (```).
+- RETURN ONLY THE YAML CONTENT.
 """
 
     def __init__(self):
@@ -68,14 +64,6 @@ You MUST fix the error by modifying the YAML. DO NOT return it unchanged.
     def fix(self, current_yml: str, error_message: str, memory: Memory) -> str:
         """
         Generate a fixed environment.yml based on the error.
-
-        Args:
-            current_yml: Current YAML content that failed
-            error_message: Error message from conda
-            memory: Memory object containing error history
-
-        Returns:
-            Fixed YAML content as string
         """
         logger.info("=" * 70)
         logger.info("BEFORE FIX:")
@@ -111,14 +99,14 @@ You MUST fix the error by modifying the YAML. DO NOT return it unchanged.
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are an expert in fixing Conda environment errors. You MUST make changes to fix the error."
+                        "content": "You are an expert DevOps engineer. Your #1 rule for fixing dependency conflicts is removing version numbers."
                     },
                     {
                         "role": "user",
                         "content": prompt
                     }
                 ],
-                temperature=0.3,  # Slightly higher for more variation
+                temperature=0.2,  # Low temperature for deterministic fixes
             )
 
             fixed_yml = response.choices[0].message.content.strip()
@@ -126,8 +114,10 @@ You MUST fix the error by modifying the YAML. DO NOT return it unchanged.
             # Clean up any markdown code blocks if present
             if fixed_yml.startswith("```"):
                 lines = fixed_yml.split("\n")
+                # Remove first line if it's ```yaml or ```
                 if lines[0].startswith("```"):
                     lines = lines[1:]
+                # Remove last line if it's ```
                 if lines and lines[-1].startswith("```"):
                     lines = lines[:-1]
                 fixed_yml = "\n".join(lines).strip()
@@ -157,20 +147,11 @@ You MUST fix the error by modifying the YAML. DO NOT return it unchanged.
 
         except Exception as e:
             logger.error(f"Error generating fix: {e}")
-            raise
+            # If API fails, try manual fix
+            return self._force_remove_problematic_package(current_yml, error_message)
 
     def _are_yamls_identical(self, yml1: str, yml2: str) -> bool:
-        """
-        Check if two YAML contents are identical (ignoring whitespace differences).
-
-        Args:
-            yml1: First YAML content
-            yml2: Second YAML content
-
-        Returns:
-            True if identical, False otherwise
-        """
-        # Normalize: remove extra whitespace, sort lines for comparison
+        """Check if two YAML contents are identical (ignoring whitespace)."""
         def normalize(yml):
             lines = [line.strip() for line in yml.strip().split("\n") if line.strip()]
             return "\n".join(sorted(lines))
@@ -179,154 +160,77 @@ You MUST fix the error by modifying the YAML. DO NOT return it unchanged.
 
     def _force_remove_problematic_package(self, yml: str, error: str) -> str:
         """
-        Fallback: forcefully fix the problematic package in YAML.
-
-        For cudnn errors, tries smart fixes before removal:
-        1. Add nvidia channel if missing
-        2. Relax cudnn version constraint
-        3. Remove cudnn entirely
-
-        Args:
-            yml: Current YAML content
-            error: Error message from conda
-
-        Returns:
-            Fixed YAML with problematic package fixed or removed
+        Fallback: Forcefully fix the problematic package.
+        Strategy:
+        1. STRIP VERSIONS (e.g., numpy==1.21 -> numpy)
+        2. If that fails, remove the package.
         """
         logger.info("Forcing fix for problematic package...")
-
-        # Special handling for cudnn errors
-        if "cudnn" in error.lower():
-            logger.info("Detected cudnn error - applying smart fixes...")
-
-            # Strategy 1: Add nvidia channel if missing
-            if "nvidia" not in yml:
-                logger.info("Adding nvidia channel to resolve cudnn...")
-                lines = yml.split('\n')
-                fixed_lines = []
-                channels_found = False
-
-                for line in lines:
-                    fixed_lines.append(line)
-                    if "channels:" in line and not channels_found:
-                        channels_found = True
-                        # Add nvidia as first channel
-                        indent = len(line) - len(line.lstrip())
-                        fixed_lines.append(' ' * (indent + 2) + '- nvidia')
-
-                if channels_found:
-                    logger.info("Added nvidia channel")
-                    return '\n'.join(fixed_lines)
-
-            # Strategy 2: Relax cudnn version constraint
-            lines = yml.split('\n')
-            fixed_lines = []
-            cudnn_fixed = False
-
-            for line in lines:
-                if 'cudnn' in line.lower() and line.strip().startswith('-'):
-                    # Change exact version to flexible version
-                    if '=' in line and not '>=' in line:
-                        logger.info(f"Relaxing cudnn version constraint from: {line.strip()}")
-                        # Replace cudnn=X.Y with cudnn>=8.0
-                        fixed_line = re.sub(r'cudnn\s*=\s*[\d.]+', 'cudnn>=8.0', line)
-                        fixed_lines.append(fixed_line)
-                        cudnn_fixed = True
-                        logger.info(f"Changed to: {fixed_line.strip()}")
-                    else:
-                        fixed_lines.append(line)
-                else:
-                    fixed_lines.append(line)
-
-            if cudnn_fixed:
-                return '\n'.join(fixed_lines)
-
-            # Strategy 3: Remove cudnn version entirely (just "- cudnn")
-            lines = yml.split('\n')
-            fixed_lines = []
-            cudnn_simplified = False
-
-            for line in lines:
-                if 'cudnn' in line.lower() and line.strip().startswith('-'):
-                    if '=' in line or '>' in line or '<' in line:
-                        indent = len(line) - len(line.lstrip())
-                        fixed_line = ' ' * indent + '- cudnn'
-                        fixed_lines.append(fixed_line)
-                        cudnn_simplified = True
-                        logger.info(f"Simplified cudnn: {line.strip()} → {fixed_line.strip()}")
-                    else:
-                        fixed_lines.append(line)
-                else:
-                    fixed_lines.append(line)
-
-            if cudnn_simplified:
-                return '\n'.join(fixed_lines)
-
-            # Strategy 4: Last resort - remove cudnn
-            logger.info("Last resort: removing cudnn entirely")
-
-        # Extract package name from error message
-        # Common patterns: "cudnn", "cudatoolkit=11.8", "package-name==1.0.0"
-        problem_packages = []
-
-        # Look for package names in error message
-        if "cudnn" in error.lower():
-            problem_packages.append("cudnn")
-        if "cudatoolkit" in error.lower():
-            problem_packages.append("cudatoolkit")
-
-        # Try to find package names in quotes or after "PackagesNotFoundError:"
-        matches = re.findall(r'["\']([a-zA-Z0-9_-]+(?:==|>=|<=)?[0-9.]*)["\']', error)
-        if matches:
-            for match in matches:
-                pkg_name = match.split('=')[0].split('>')[0].split('<')[0]
-                if pkg_name not in problem_packages:
-                    problem_packages.append(pkg_name)
-
-        # Also look for "- packagename" pattern in error
-        matches = re.findall(r'- ([a-zA-Z0-9_-]+)', error)
-        if matches:
-            for match in matches:
-                if match not in problem_packages:
-                    problem_packages.append(match)
-
-        logger.info(f"Identified problematic packages: {problem_packages}")
-
-        # Remove lines containing these packages
         lines = yml.split('\n')
         fixed_lines = []
+        
+        # 1. Identify problematic packages from error message
+        problem_packages = []
+        matches = re.findall(r'["\']([a-zA-Z0-9_-]+)(?:==|>=|<=)?[0-9.]*["\']', error)
+        if matches:
+            problem_packages.extend([m for m in matches if m not in problem_packages])
+        
+        # Look for "- package" pattern
+        matches = re.findall(r'- ([a-zA-Z0-9_-]+)', error)
+        if matches:
+            problem_packages.extend([m for m in matches if m not in problem_packages])
 
+        # Common suspects for "pip failed" without clear names
+        if "Pip failed" in error and not problem_packages:
+            logger.info("Pip failed but no package named. Stripping versions from ALL pip packages.")
+            problem_packages = ["ALL_PIP"]
+
+        logger.info(f"Identified problematic targets: {problem_packages}")
+
+        # 2. Apply fixes
+        in_pip_section = False
         for line in lines:
-            should_remove = False
-            for pkg in problem_packages:
-                if pkg in line and line.strip().startswith('-'):
-                    should_remove = True
-                    logger.info(f"Removing line: {line.strip()}")
-                    break
+            stripped_line = line.strip()
+            
+            if stripped_line == "pip:":
+                in_pip_section = True
+                fixed_lines.append(line)
+                continue
+            
+            if not stripped_line.startswith("-"):
+                in_pip_section = False
+                fixed_lines.append(line)
+                continue
 
-            if not should_remove:
+            # Check if this line needs fixing
+            should_fix = False
+            package_name = stripped_line.replace("-", "").strip().split("=")[0].split(">")[0].split("<")[0]
+            
+            if "ALL_PIP" in problem_packages and in_pip_section:
+                should_fix = True
+            elif any(pkg in stripped_line for pkg in problem_packages):
+                should_fix = True
+
+            if should_fix:
+                # STRATEGY: Strip Version Constraints (Keep package name)
+                if "==" in line or ">=" in line or "<=" in line:
+                    # Get indentation
+                    indent = line[:line.find("-")]
+                    new_line = f"{indent}- {package_name}"
+                    logger.info(f"Relaxing constraint: {stripped_line} -> {package_name}")
+                    fixed_lines.append(new_line)
+                else:
+                    # Already no version? Maybe remove it if it was explicitly flagged as not found
+                    if "PackagesNotFoundError" in error:
+                        logger.info(f"Removing not found package: {stripped_line}")
+                        pass # Skip adding this line (delete it)
+                    else:
+                        fixed_lines.append(line)
+            else:
                 fixed_lines.append(line)
 
-        fixed_yml = '\n'.join(fixed_lines)
-
-        # If nothing was removed, just remove the first conda dependency as last resort
-        if fixed_yml.strip() == yml.strip():
-            logger.warning("Could not identify problematic package, removing first conda package...")
-            lines = yml.split('\n')
-            fixed_lines = []
-            removed_one = False
-
-            for line in lines:
-                if not removed_one and line.strip().startswith('- ') and 'pip' not in line:
-                    logger.info(f"Removing line (fallback): {line.strip()}")
-                    removed_one = True
-                    continue
-                fixed_lines.append(line)
-
-            fixed_yml = '\n'.join(fixed_lines)
-
-        return fixed_yml
-
+        return '\n'.join(fixed_lines)
+    
     def extract_fix_summary(self, original_yml: str, fixed_yml: str) -> str:
         """
         Extract a summary of what was changed.
@@ -348,12 +252,14 @@ You MUST fix the error by modifying the YAML. DO NOT return it unchanged.
         summary_parts = []
         if removed:
             removed_list = [line.strip() for line in removed if line.strip()]
-            summary_parts.append(f"Removed {len(removed_list)} lines: {', '.join(list(removed_list)[:3])}")
+            # Show up to 3 removed items
+            summary_parts.append(f"Removed/Changed {len(removed_list)} lines: {', '.join(list(removed_list)[:3])}")
+        
         if added:
             added_list = [line.strip() for line in added if line.strip()]
-            summary_parts.append(f"Added {len(added_list)} lines")
+            summary_parts.append(f"Added/Updated {len(added_list)} lines")
 
         if not summary_parts:
-            return "No changes detected"
+            return "No obvious changes detected (formatting only?)"
 
         return "; ".join(summary_parts)

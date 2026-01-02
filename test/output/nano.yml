@@ -1,0 +1,19 @@
+name: nanogpt
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - datasets
+  - numpy
+  - requests
+  - pytorch
+  - torchvision
+  - tqdm
+  - transformers
+  - wandb
+  - pip
+  - pip:
+    - tiktoken

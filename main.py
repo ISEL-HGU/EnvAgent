@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-EnvAgent - Automatic Conda environment.yml generator.
+EnvAgent - Automatic Conda environment.yml generator (NEW ARCHITECTURE).
 
-Analyzes local project directories and generates Conda environment files
-using AI-powered dependency analysis with iterative error fixing.
+Token-efficient version that processes files one-by-one.
 """
 
 import argparse
 import logging
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 
 from config.settings import settings
-from utils import LocalReader, Memory, CondaExecutor, sanitize_env_name
-from agents import ProjectAnalyzer, EnvironmentBuilder, EnvironmentFixer
+from utils.system_checker import SystemChecker
+from utils.file_filter import FileFilter
+from utils import CondaExecutor, sanitize_env_name
+from agents.decision_agent import DecisionAgent
+from agents.code_scanner import CodeScannerAgent
+from agents import EnvironmentBuilder, EnvironmentFixer
 
 
 def setup_logging() -> None:
@@ -67,6 +69,13 @@ Examples:
     )
 
     parser.add_argument(
+        "--python-version",
+        type=str,
+        default="3.9",
+        help="Python version (default: 3.9)"
+    )
+
+    parser.add_argument(
         "--no-create",
         action="store_true",
         help="Only generate yml file, skip conda environment creation"
@@ -107,7 +116,8 @@ def main() -> None:
     logger = logging.getLogger(__name__)
 
     print("=" * 60)
-    print("EnvAgent - Conda Environment Generator with Auto-Fix")
+    print("EnvAgent - Conda Environment Generator v2.0")
+    print("Token-Efficient Architecture")
     print("=" * 60)
     print()
 
@@ -131,58 +141,117 @@ def main() -> None:
     print()
 
     try:
-        # Step 1: Read local files
-        print("📖 Step 1/4: Reading project files...")
-        reader = LocalReader(str(directory_path))
-        files_content = reader.read_files()
+        # ============================================================
+        # STEP 0: System Pre-Check (NO LLM)
+        # ============================================================
+        print("🔍 Step 0/6: Checking system requirements...")
+        checker = SystemChecker()
+        passed, messages = checker.run_all_checks()
 
-        if not files_content:
-            print("⚠️  Warning: No relevant files found in the directory.")
-            print("Make sure the directory contains Python files or dependency files.")
+        for msg in messages:
+            print(f"   {msg}")
+
+        if not passed:
+            print()
+            print("❌ System check failed. Please fix the issues above and try again.")
             sys.exit(1)
 
-        print(f"   Found {len(files_content)} files to analyze")
+        print("   ✓ All system checks passed")
         print()
 
-        # Step 2: Analyze project
-        print("🔍 Step 2/4: Analyzing project dependencies...")
-        print("   (This may take a moment...)")
-        memory = Memory()
-        analyzer = ProjectAnalyzer()
-        analyzer.analyze(files_content, memory)
+        # ============================================================
+        # STEP 1: Decision Agent
+        # ============================================================
+        print("📋 Step 1/6: Analyzing project structure...")
+        decision_agent = DecisionAgent()
+        decision = decision_agent.decide(str(directory_path))
 
-        print(f"   ✓ Project: {memory.project_name}")
-        print(f"   ✓ Python version: {memory.python_version}")
-        print(f"   ✓ Packages found: {len(memory.package_list)}")
-        if memory.cuda_version:
-            print(f"   ✓ CUDA version: {memory.cuda_version}")
-        if memory.cudnn_version:
-            print(f"   ✓ cuDNN version: {memory.cudnn_version}")
+        print(f"   Decision: {decision['reason']}")
+
+        if decision["has_env_setup"] and not decision["proceed_with_analysis"]:
+            print()
+            print("=" * 60)
+            print("✅ Environment file already exists!")
+            print("=" * 60)
+            print()
+            print(f"Type: {decision['env_type']}")
+            print(f"File: {decision['env_file']}")
+            print()
+            print("Recommendation: Use the existing environment file.")
+            print()
+            return
+
+        print("   ✓ Will proceed with dependency analysis")
         print()
 
-        # Step 3: Build environment.yml
-        print("🔨 Step 3/4: Generating environment.yml...")
+        # ============================================================
+        # STEP 2: Filter relevant files (NO LLM)
+        # ============================================================
+        print("📁 Step 2/6: Filtering relevant source files...")
+        file_filter = FileFilter()
+        relevant_files = file_filter.get_relevant_files(str(directory_path))
+
+        if not relevant_files:
+            print("   ⚠️  No relevant files found!")
+            print("   Make sure the directory contains Python files.")
+            sys.exit(1)
+
+        print(f"   ✓ Found {len(relevant_files)} relevant files")
+
+        # Show file types
+        dep_files = [f for f in relevant_files if f.name in FileFilter.ALWAYS_INCLUDE]
+        py_files = [f for f in relevant_files if f.suffix == '.py']
+        print(f"     - Dependency files: {len(dep_files)}")
+        print(f"     - Python source files: {len(py_files)}")
+        print()
+
+        # ============================================================
+        # STEP 3: Scan files one by one (프로젝트 이름 반영)
+        # ============================================================
+        print("🔬 Step 3/6: Scanning source files for dependencies...")
+        print("   (This processes files one-by-one to avoid token limits)")
+        print()
+
+       
+        project_name = args.env_name if args.env_name else directory_path.name
+        sanitized_name = sanitize_env_name(project_name)
+
+        scanner = CodeScannerAgent(output_dir=str(output_dir))
+ 
+        summary_path = scanner.scan_all_files(relevant_files, directory_path, project_name=sanitized_name)
+
+        print()
+        print(f"   ✓ Dependency summary saved to: {summary_path.name}")
+        print()
+
+        # ============================================================
+        # STEP 4: Build environment.yml from summary
+        # ============================================================
+        print("🔨 Step 4/6: Generating environment.yml...")
+
         builder = EnvironmentBuilder()
-        env_content = builder.build(memory)
-
+        env_content = builder.build_from_summary(
+            summary_path=str(summary_path),
+            project_name=project_name, # 위에서 구한 이름 그대로 사용
+            python_version=args.python_version
+        )
         # Save to file
         builder.save_to_file(env_content, str(output_path))
 
         print(f"   ✓ Saved to: {output_path}")
         print()
 
-        # Determine environment name and sanitize it
-        env_name = args.env_name if args.env_name else memory.project_name
-        sanitized_env_name = sanitize_env_name(env_name)
-
-        # Show sanitization if name was changed
-        if sanitized_env_name != env_name:
-            print(f"   ℹ️  Environment name sanitized: '{env_name}' → '{sanitized_env_name}'")
+        # Sanitize environment name
+        sanitized_env_name = sanitize_env_name(project_name)
+        if sanitized_env_name != project_name:
+            print(f"   ℹ️  Environment name sanitized: '{project_name}' → '{sanitized_env_name}'")
             print()
 
-        # Step 4: Create and validate (with retry logic)
+        # ============================================================
+        # STEP 5: Create and validate (with retry logic)
+        # ============================================================
         if not args.no_create:
-            print(f"🚀 Step 4/4: Creating conda environment '{sanitized_env_name}'...")
+            print(f"🚀 Step 5/6: Creating conda environment '{sanitized_env_name}'...")
             print(f"   (Maximum {settings.MAX_RETRIES} attempts with auto-fix)")
             print()
 
@@ -195,6 +264,7 @@ def main() -> None:
                 conda_executor.remove_environment(sanitized_env_name)
 
             current_yml = env_content
+            error_history = []
 
             # STRICT 5 RETRY LIMIT
             for attempt in range(1, settings.MAX_RETRIES + 1):
@@ -211,6 +281,7 @@ def main() -> None:
                     print("Environment details:")
                     print(f"  • Name: {sanitized_env_name}")
                     print(f"  • Config file: {output_path}")
+                    print(f"  • Summary file: {summary_path}")
                     print()
                     print("Next steps:")
                     print(f"  1. Activate the environment:")
@@ -236,6 +307,7 @@ def main() -> None:
                     print()
                     print("The environment could not be created automatically.")
                     print(f"Generated file saved at: {output_path}")
+                    print(f"Dependency summary at: {summary_path}")
                     print()
                     print("You can:")
                     print("1. Manually review and edit the environment.yml file")
@@ -247,14 +319,19 @@ def main() -> None:
                 # Fix and retry
                 print(f"   🔧 Generating fix (attempt {attempt}/{settings.MAX_RETRIES})...")
                 try:
+                    # Create a minimal memory object for fixer
+                    from utils.memory import Memory
+                    memory = Memory()
+                    memory.error_history = error_history
+
                     fixed_yml = fixer.fix(current_yml, error, memory)
                     fix_summary = fixer.extract_fix_summary(current_yml, fixed_yml)
 
                     # Save the fix
                     builder.save_to_file(fixed_yml, str(output_path))
 
-                    # Update memory
-                    memory.error_history.append((error[:500], fix_summary))
+                    # Update error history
+                    error_history.append((error[:500], fix_summary))
 
                     # Update current yml for next iteration
                     current_yml = fixed_yml
@@ -270,7 +347,7 @@ def main() -> None:
                     sys.exit(1)
         else:
             # --no-create flag
-            print("🔨 Step 4/4: Skipped (--no-create flag)")
+            print("🔨 Step 5/6: Skipped (--no-create flag)")
             print()
             print("=" * 60)
             print("✅ Success! Environment file generated.")
@@ -285,9 +362,6 @@ def main() -> None:
             print()
             print(f"3. Activate the environment:")
             print(f"   conda activate {sanitized_env_name}")
-            print()
-            print(f"4. Verify installation:")
-            print(f"   python --version")
             print()
 
     except ValueError as e:

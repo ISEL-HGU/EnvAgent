@@ -15,7 +15,7 @@ class Settings:
     """Configuration settings for the EnvAgent application."""
 
     # Maximum number of retry attempts for fixing conda environment errors
-    MAX_RETRIES: int = 5
+    MAX_RETRIES: int = 8
 
     def __init__(self):
         """Initialize settings by loading from environment variables."""
