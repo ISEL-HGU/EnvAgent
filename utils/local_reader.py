@@ -26,18 +26,111 @@ class LocalReader:
 
     # Directories to exclude when searching for Python files
     EXCLUDE_DIRS = {
+        # Python/Build artifacts
         "__pycache__",
-        ".git",
-        "venv",
-        "env",
-        "ENV",
-        "node_modules",
         ".pytest_cache",
         ".tox",
+        ".nox",
+        ".mypy_cache",
         "build",
         "dist",
         ".eggs",
         "*.egg-info",
+        "*.egg",
+        "wheels",
+        "sdist",
+
+        # Virtual environments
+        "venv",
+        ".venv",
+        "env",
+        "ENV",
+        "virtualenv",
+
+        # Version control
+        ".git",
+        ".github",
+        ".gitlab",
+        ".circleci",
+        ".svn",
+        ".hg",
+
+        # IDEs
+        ".idea",
+        ".vscode",
+        ".settings",
+        ".project",
+        ".pydevproject",
+
+        # Testing
+        "tests",
+        "test",
+        "testing",
+        "coverage",
+        ".coverage",
+        "htmlcov",
+
+        # Documentation
+        "docs",
+        "doc",
+        "documentation",
+
+        # Examples/Samples
+        "examples",
+        "example",
+        "samples",
+        "sample",
+        "demo",
+        "demos",
+
+        # Benchmarks
+        "benchmarks",
+        "benchmark",
+
+        # Scripts/Tools
+        "scripts",
+        "tools",
+
+        # Assets
+        "assets",
+        "images",
+        "static",
+        "media",
+        "public",
+
+        # Data
+        "data",
+        "datasets",
+        "checkpoints",
+        "weights",
+        "models",
+
+        # Logs/Temp
+        "logs",
+        "log",
+        "tmp",
+        "temp",
+        "cache",
+
+        # Migrations/Locale
+        "migrations",
+        "locale",
+        "locales",
+        "i18n",
+        "l10n",
+
+        # Dependencies
+        "node_modules",
+        "vendor",
+        "third_party",
+        "external",
+        "lib",
+        "libs",
+
+        # Output
+        "output",
+        "out",
+        "results",
     }
 
     def __init__(self, directory_path: str):
