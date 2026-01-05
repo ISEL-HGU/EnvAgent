@@ -3,6 +3,7 @@ Environment Builder Agent (Improved).
 - Avoids hardcoding python=3.9
 - Infers minimum Python version from project / summary signals
 - Generates robust environment.yml via LLM
+- CRITICAL: Automatically translates pip names (torch) to conda names (pytorch)
 """
 
 import logging
@@ -21,6 +22,9 @@ logger = logging.getLogger(__name__)
 class EnvironmentBuilder:
     """Builds a Conda environment.yml file from analysis results."""
 
+    # ------------------------------------------------------------------
+    # 🧠 PROMPT FOR SUMMARY (FROM CODE SCANNER)
+    # ------------------------------------------------------------------
     BUILD_FROM_SUMMARY_PROMPT = """
 You are a Senior DevOps Engineer.
 Your task is to create a robust `environment.yml` file based on the provided dependency summary.
@@ -35,23 +39,82 @@ Your task is to create a robust `environment.yml` file based on the provided dep
 
 ### 🚨 STRICT RULES
 
-1. **PACKAGE VERSION POLICY:**
-   - Avoid exact pinning (e.g., `==1.2.3`) unless the summary explicitly requires it.
-   - Prefer no version or loose constraints.
+1. **CRITICAL: PACKAGE MAPPING (TRANSLATION):**
+   - **`torch`** → **`pytorch`** (Conda uses `pytorch`, NOT `torch`)
+   - **`opencv-python`** / `cv2` → **`opencv`**
+   - **`Pillow`** → **`pillow`**
+   - **`scikit-learn`** → **`scikit-learn`** (Check spelling)
+   - **`protobuf`** → **`libprotobuf`** (If needed) or `protobuf`
 
-2. **PYTHON VERSION POLICY (IMPORTANT):**
-   - Keep the provided Python version as the default target.
-   - If you must raise it for compatibility (rare), raise only minimally.
+2. **PYTHON VERSION POLICY:**
+   - Keep the provided Python version ({python_version}) as the default target.
+   - Do not raise it arbitrarily unless absolutely necessary for compatibility.
 
 3. **CHANNEL PRIORITY:**
-   - Always include `conda-forge` and `defaults`.
-   - If CUDA/GPU is needed, include `nvidia` FIRST.
+   - **`pytorch`** (First priority for torch)
+   - **`nvidia`** (If CUDA/GPU is needed)
+   - `conda-forge`
+   - `defaults`
 
-4. **PACKAGE MAPPING:**
-   - Map import names to correct packages (e.g., `cv2` -> `opencv`, `sklearn` -> `scikit-learn`, `PIL` -> `pillow`).
+4. **OUTPUT FORMAT:**
+   - Return ONLY raw YAML (no markdown, no explanations).
+"""
+
+    # ------------------------------------------------------------------
+    # 🧠 PROMPT FOR EXISTING FILES (REQUIREMENTS.TXT / SETUP.PY)
+    # ------------------------------------------------------------------
+    BUILD_FROM_EXISTING_FILES_PROMPT = """
+You are a Senior DevOps Engineer.
+Your task is to convert existing environment file(s) into a unified Conda `environment.yml` file.
+
+### PROJECT DETAILS
+- **Project Name:** {project_name}
+- **Python Version (target):** {python_version}
+
+### EXISTING ENVIRONMENT FILES CONTENT
+{collected_content}
+
+### 🚨 STRICT RULES
+
+1. **CRITICAL: PACKAGE NORMALIZATION (Pip -> Conda):**
+   - You **MUST** translate Pip package names to Conda equivalents:
+   - **`torch`** → **`pytorch`** (MANDATORY)
+   - **`opencv-python`** → **`opencv`**
+   - **`tensorflow-gpu`** → **`tensorflow`**
+   - **`Pillow`** → **`pillow`**
+
+2. **VERSION HANDLING:**
+   - Preserve version constraints (e.g., `numpy>=1.20` stays `numpy>=1.20`)
+   - But if you see `==` for libraries like numpy/pandas, consider loosening to `>=` to avoid conflicts.
+
+3. **CHANNEL PRIORITY:**
+   - channels:
+     - pytorch
+     - nvidia
+     - conda-forge
+     - defaults
+
+4. **PIP FALLBACK:**
+   - If a package is definitely NOT in Conda (e.g., `thop`, `auto-gpt-libs`), put it under the `- pip:` section.
 
 5. **OUTPUT FORMAT:**
-   - Return ONLY raw YAML (no markdown, no explanations).
+   - Return ONLY raw YAML.
+   - No markdown, no explanations.
+   - Structure:
+     ```yaml
+     name: {project_name}
+     channels:
+       - pytorch
+       - nvidia
+       - conda-forge
+       - defaults
+     dependencies:
+       - python={python_version}
+       - pytorch  # Example of mapped name
+       - opencv   # Example of mapped name
+       - pip:
+         - some-pip-only-package
+     ```
 """
 
     # ---- Heuristic triggers for minimum Python versions ----
@@ -60,8 +123,6 @@ Your task is to create a robust `environment.yml` file based on the provided dep
         re.compile(r"^\s*match\s+.+:\s*$", re.MULTILINE),
         re.compile(r"^\s*case\s+.+:\s*$", re.MULTILINE),
     ]
-    # typing features etc could be extended later (3.11/3.12 triggers)
-    # keep conservative to avoid unnecessary raises.
 
     def __init__(self):
         self.client = OpenAI(api_key=settings.api_key)
@@ -79,12 +140,6 @@ Your task is to create a robust `environment.yml` file based on the provided dep
     ) -> str:
         """
         Generate environment.yml content from a dependency summary file.
-
-        Args:
-            summary_path: path to dependency_summary_*.txt
-            project_name: env/project name
-            python_version: optional; if None -> infer
-            repo_root: optional repo root path; used to infer python version
         """
         logger.info(f"Building environment.yml from summary: {summary_path}")
 
@@ -114,10 +169,35 @@ Your task is to create a robust `environment.yml` file based on the provided dep
 
         env_content = self._call_llm(prompt)
         env_content = self._clean_markdown(env_content)
-
-        # Safety check: ensure python= is present and matches target_python loosely
         env_content = self._ensure_python_dep(env_content, target_python)
 
+        return env_content
+
+    def build_from_existing_files(
+        self,
+        collected_content: str,
+        project_name: str = "my_project",
+        python_version: str = "3.9"
+    ) -> str:
+        """
+        Generate environment.yml content from existing environment files.
+        """
+        logger.info("Building environment.yml from existing environment files...")
+
+        sanitized_name = sanitize_env_name(project_name)
+        logger.info(f"Using sanitized environment name: {sanitized_name}")
+
+        prompt = self.BUILD_FROM_EXISTING_FILES_PROMPT.format(
+            project_name=sanitized_name,
+            python_version=python_version,
+            collected_content=collected_content
+        )
+
+        env_content = self._call_llm(prompt)
+        env_content = self._clean_markdown(env_content)
+        env_content = self._ensure_python_dep(env_content, python_version)
+
+        logger.info("Successfully generated environment.yml from existing files")
         return env_content
 
     # ----------------------------
@@ -135,15 +215,10 @@ Your task is to create a robust `environment.yml` file based on the provided dep
         - If summary contains a python requirement hint -> use that
         - Else default to a modern safe baseline (3.11)
         """
-        # 1) Try extracting explicit hint from summary (if you later add it)
-        # Example accepted forms:
-        #   "Python Version Hint: 3.10"
-        #   "Requires-Python: >=3.11"
         hint = self._extract_python_hint_from_summary(summary_content)
         if hint:
             return hint
 
-        # 2) Scan repo for syntax triggers (only if repo_root given)
         if repo_root:
             try:
                 min_ver = self._scan_repo_for_min_python(repo_root)
@@ -152,43 +227,28 @@ Your task is to create a robust `environment.yml` file based on the provided dep
             except Exception as e:
                 logger.warning(f"Python version inference scan failed: {e}")
 
-        # 3) Fallback baseline (avoid 3.9; prefer modern default)
         return "3.11"
 
     def _extract_python_hint_from_summary(self, summary_content: str) -> Optional[str]:
-        # simple patterns; extend if you write hints into summary later
         m = re.search(r"Python\s+Version\s+Hint:\s*([0-9]+\.[0-9]+)", summary_content, re.IGNORECASE)
-        if m:
-            return m.group(1)
+        if m: return m.group(1)
 
         m = re.search(r"Requires-Python:\s*>=\s*([0-9]+\.[0-9]+)", summary_content, re.IGNORECASE)
-        if m:
-            return m.group(1)
-
+        if m: return m.group(1)
         return None
 
     def _scan_repo_for_min_python(self, repo_root: str) -> Optional[str]:
-        """
-        Minimal scan:
-        - Search .py files for match/case syntax triggers -> 3.10
-        Keep it fast: scan a bounded number of files or size if needed.
-        """
         root = Path(repo_root)
-        if not root.exists():
-            return None
+        if not root.exists(): return None
 
-        # Prefer scanning conftest.py and tests first (where you saw the failure)
         candidates = []
         for p in [root / "conftest.py", root / "tests"]:
             if p.exists():
-                if p.is_file():
-                    candidates.append(p)
-                else:
-                    candidates.extend(list(p.rglob("*.py")))
+                if p.is_file(): candidates.append(p)
+                else: candidates.extend(list(p.rglob("*.py")))
 
-        # If nothing found, scan a limited subset of repo python files
         if not candidates:
-            candidates = list(root.rglob("*.py"))[:500]  # cap to avoid huge repos
+            candidates = list(root.rglob("*.py"))[:500]
 
         for pyfile in candidates:
             try:
@@ -197,23 +257,15 @@ Your task is to create a robust `environment.yml` file based on the provided dep
                     return "3.10"
             except Exception:
                 continue
-
         return None
 
     def _choose_python_version(self, user_version: Optional[str], inferred_version: str) -> str:
-        """
-        Choose max(user_version, inferred_version) by major.minor comparison.
-        If user_version is None -> inferred_version.
-        """
-        if not user_version:
-            return inferred_version
-
+        if not user_version: return inferred_version
         try:
             u = self._parse_major_minor(user_version)
             i = self._parse_major_minor(inferred_version)
             return user_version if u >= i else inferred_version
         except Exception:
-            # If parsing fails, trust user input
             return user_version
 
     def _parse_major_minor(self, v: str) -> Tuple[int, int]:
@@ -227,7 +279,7 @@ Your task is to create a robust `environment.yml` file based on the provided dep
         response = self.client.chat.completions.create(
             model="gpt-4-turbo-preview",
             messages=[
-                {"role": "system", "content": "You are a Conda expert. Output ONLY valid YAML."},
+                {"role": "system", "content": "You are a Conda expert. You ALWAYS map 'torch' to 'pytorch' and 'opencv-python' to 'opencv'. Output ONLY valid YAML."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
@@ -235,26 +287,19 @@ Your task is to create a robust `environment.yml` file based on the provided dep
         return response.choices[0].message.content.strip()
 
     def _ensure_python_dep(self, env_yaml: str, python_version: str) -> str:
-        """
-        Ensure 'python=<version>' exists under dependencies.
-        If python already present, do not try to rewrite aggressively (avoid corrupt YAML).
-        """
         if re.search(r"^\s*-\s*python\s*=", env_yaml, re.MULTILINE):
             return env_yaml
 
-        # Insert under dependencies: after the line 'dependencies:'
         lines = env_yaml.splitlines()
         out = []
         inserted = False
         for idx, line in enumerate(lines):
             out.append(line)
             if not inserted and re.match(r"^\s*dependencies:\s*$", line):
-                # next indentation level is typically two spaces
                 out.append(f"  - python={python_version}")
                 inserted = True
 
         if not inserted:
-            # fallback: append a minimal section (last resort)
             out.append("dependencies:")
             out.append(f"  - python={python_version}")
 
@@ -263,10 +308,8 @@ Your task is to create a robust `environment.yml` file based on the provided dep
     def _clean_markdown(self, content: str) -> str:
         if content.startswith("```"):
             lines = content.split("\n")
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
+            if lines and lines[0].startswith("```"): lines = lines[1:]
+            if lines and lines[-1].startswith("```"): lines = lines[:-1]
             content = "\n".join(lines)
         return content.strip()
 

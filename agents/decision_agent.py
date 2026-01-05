@@ -133,6 +133,79 @@ Rules:
         logger.warning("No README file found")
         return None
 
+    def collect_env_files_content(self, project_path: str) -> str:
+        """
+        Collect and consolidate content from all existing environment files.
+
+        Args:
+            project_path: Root directory of the project
+
+        Returns:
+            Consolidated text with all environment file contents
+        """
+        logger.info("Collecting content from existing environment files...")
+        project_dir = Path(project_path).resolve()
+        consolidated_parts = []
+
+        # Check each known environment file
+        for env_file in self.ENV_FILES:
+            file_path = project_dir / env_file
+            if file_path.exists() and file_path.is_file():
+                try:
+                    size = file_path.stat().st_size
+                    if size > 0:  # Only read non-empty files
+                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+
+                        # Special handling for different file types
+                        if env_file == 'setup.py':
+                            # Extract install_requires section
+                            deps = self._extract_setup_py_deps(content)
+                            if deps:
+                                consolidated_parts.append(f"=== {env_file} (install_requires) ===\n{deps}\n")
+                        elif env_file == 'pyproject.toml':
+                            # Extract dependencies section
+                            deps = self._extract_pyproject_deps(content)
+                            if deps:
+                                consolidated_parts.append(f"=== {env_file} (dependencies) ===\n{deps}\n")
+                        else:
+                            # For requirements.txt, environment.yml, etc., use full content
+                            consolidated_parts.append(f"=== {env_file} ===\n{content}\n")
+
+                        logger.info(f"Collected content from: {env_file} ({size} bytes)")
+                except Exception as e:
+                    logger.warning(f"Error reading {env_file}: {e}")
+
+        if not consolidated_parts:
+            return "No environment files found with content."
+
+        result = "\n".join(consolidated_parts)
+        logger.info(f"Consolidated {len(consolidated_parts)} environment files")
+        return result
+
+    def _extract_setup_py_deps(self, content: str) -> str:
+        """Extract install_requires from setup.py."""
+        import re
+        # Look for install_requires list
+        match = re.search(r'install_requires\s*=\s*\[(.*?)\]', content, re.DOTALL)
+        if match:
+            deps_text = match.group(1)
+            # Clean up quotes and commas
+            deps = re.findall(r'["\']([^"\']+)["\']', deps_text)
+            return '\n'.join(deps)
+        return ""
+
+    def _extract_pyproject_deps(self, content: str) -> str:
+        """Extract dependencies from pyproject.toml."""
+        import re
+        # Look for dependencies array in [project] or [tool.poetry.dependencies]
+        match = re.search(r'dependencies\s*=\s*\[(.*?)\]', content, re.DOTALL)
+        if match:
+            deps_text = match.group(1)
+            deps = re.findall(r'["\']([^"\']+)["\']', deps_text)
+            return '\n'.join(deps)
+        return ""
+
     def decide(self, project_path: str) -> Dict:
         """
         Main decision logic.
