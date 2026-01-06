@@ -20,7 +20,6 @@
 - [Usage Guide](#usage-guide)
 - [How It Works](#how-it-works)
 - [Technical Innovations](#technical-innovations)
-- [Evaluation & Results](#evaluation--results)
 - [Troubleshooting](#troubleshooting)
 - [Project Structure](#project-structure)
 - [Documentation](#documentation)
@@ -672,49 +671,6 @@ dependencies:
 **Trade-off**: Reduces portability but ensures **execution success** (prioritized for research/development workflows).
 
 ---
-
-## Evaluation & Results
-
-### Experimental Setup
-
-- **Test Projects**: 15 open-source Python projects (ML/DL, web, data science)
-- **Project Sizes**: 10-1,500 files
-- **Metrics**:
-  - **Accuracy**: % of dependencies correctly detected
-  - **Success Rate**: % of environments created successfully
-  - **Fix Rate**: % of errors resolved by auto-fix loop
-  - **Time**: Total execution time
-
-### Results Summary
-
-| Metric | v1.0 (Baseline) | v2.0 (EnvAgent) | Improvement |
-|--------|----------------|-----------------|-------------|
-| **Dependency Accuracy** | 78.3% | **94.7%** | +16.4% |
-| **Success Rate (Simple)** | 85.2% | **96.8%** | +11.6% |
-| **Success Rate (Monorepo)** | 12.5% | **87.5%** | +75.0% |
-| **Success Rate (macOS)** | 0% (CUDA) | **100%** | +100% |
-| **Avg. Execution Time** | 45s | 78s | -33s (acceptable) |
-| **Token Usage** | 50K+ | 4.2K | **-91.6%** |
-| **Auto-Fix Success** | N/A | **89.3%** | New feature |
-
-### Key Findings
-
-1. **Hybrid Analysis**: AST + Config increased accuracy from 78% to 95%
-2. **Monorepo Detection**: Directory Scoring solved 7/8 monorepo failures
-3. **OS-Aware Filtering**: Fixed 100% of macOS CUDA failures
-4. **Auto-Fix Loop**: Resolved 89% of conda errors automatically
-5. **Scalability**: Handled projects up to 1,500 files (v1.0 failed at 500+ files)
-
-### Example Projects Tested
-
-- ✅ **YOLOv5** (147 files): 98% accuracy, 1 retry
-- ✅ **AutoGPT** (1,200+ files, monorepo): Correctly detected `classic/original_autogpt/`
-- ✅ **Flask** (85 files): 100% accuracy, 0 retries
-- ✅ **TensorFlow Examples** (320 files): 96% accuracy, 2 retries (CUDA version conflict)
-- ✅ **Pandas** (650 files): 95% accuracy, 0 retries
-
----
-
 ## Troubleshooting
 
 ### Common Issues
@@ -764,7 +720,7 @@ python main.py ../my_project
 3. Review error messages and manually remove conflicting packages
 4. Install problematic packages separately after environment creation
 
-**Note**: 8-retry limit is optimized based on experiments (95% of fixable errors resolve within 8 attempts).
+**Note**: 8-retry limit is optimized based on experiments 
 
 ---
 
@@ -857,26 +813,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 
 ---
 
-## License
-
-This project is licensed under the MIT License - see [LICENSE](LICENSE) file for details.
-
----
-
-## Citation
-
-If you use EnvAgent in your research, please cite:
-
-```bibtex
-@inproceedings{envagent2025,
-  title={EnvAgent: AI-Powered Conda Environment Generator with Self-Healing Capabilities},
-  author={[Your Name]},
-  booktitle={Proceedings of the Korea Conference on Software Engineering (KCSE)},
-  year={2025}
-}
-```
-
----
 
 ## Acknowledgments
 
@@ -885,13 +821,3 @@ If you use EnvAgent in your research, please cite:
 - **Python AST**: For efficient static code analysis
 
 ---
-
-## Contact & Support
-
-- **Issues**: [GitHub Issues](https://github.com/yourusername/EnvAgent/issues)
-- **Email**: your.email@example.com
-- **Conference**: KCSE 2025
-
----
-
-**Made with ❤️ for researchers and developers who value automated environment management**
