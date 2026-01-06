@@ -81,6 +81,27 @@ EnvAgent addresses these challenges through:
 
 ---
 
+## System Architecture
+
+EnvAgent uses a **multi-agent architecture** with 6 distinct processing steps, designed to minimize token usage while maximizing environment creation success.
+
+<p align="center">
+  <img src="architecture.png" alt="EnvAgent System Architecture" width="100%">
+</p>
+
+### Architecture Highlights
+
+- **No LLM Overhead**: Steps 0 and 2 use deterministic algorithms (no API calls), reducing costs.
+- **Smart Routing**: 
+  - **PATH A**: Bypasses heavy analysis for projects with existing valid configs.
+  - **PATH B**: Performs deep AST analysis only when necessary.
+- **Incremental Processing**: Step 3 processes files individually to avoid token limits on large codebases.
+- **Adaptive Self-Healing**: The Auto-fix loop (Step 5) learns from errors using GPT-4 to iteratively repair the environment.
+
+See [FLOW_ARCHITECTURE.md](FLOW_ARCHITECTURE.md) for detailed data flow diagrams.
+
+---
+
 ## Key Features
 
 ### 🤖 AI-Powered Analysis
