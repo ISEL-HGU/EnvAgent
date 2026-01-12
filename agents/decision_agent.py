@@ -1,168 +1,236 @@
 """
-Decision Agent (Final Version).
-Analyzes project structure, finds true root (Monorepo), and collects env details.
+Decision Agent (Refactored Final Version).
+Analyzes project structure, detects Monorepo roots, and decides analysis strategy.
 """
 
 import logging
 import json
-import re  # 👈 정규식 처리를 위해 필요
+import re
+import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from openai import OpenAI
 
 from config.settings import settings
-from agents.code_scanner import CodeScannerAgent 
 
 logger = logging.getLogger(__name__)
 
-
 class DecisionAgent:
-    """Analyzes project to determine if environment files exist and next steps."""
+    """Analyzes project structure to determine the best environment creation strategy."""
 
-    DECISION_PROMPT = """You are a project environment analyzer. 
-Your goal is to help create a local Conda environment (python).
-
-Read the README.md and existing file list to determine the next steps.
-
-README.md content:
-{readme_content}
-
-Existing files found in project (at {current_path}):
-{existing_files}
-
-Analyze the README and existing files to determine:
-1. Is there a valid setup file for LOCAL development (requirements.txt, environment.yml, setup.py)?
-2. If only Docker/Dockerfile is present, we still need to convert it to Conda.
-
-Output JSON format:
-{{
-    "has_env_setup": true/false,
-    "env_type": "conda" | "pip" | "docker" | "poetry" | "none",
-    "env_file": "path/to/file or null",
-    "proceed_with_analysis": true/false,
-    "reason": "explanation of the decision"
-}}
-
-CRITICAL RULES:
-1. If 'environment.yml', 'requirements.txt' (non-empty), or 'setup.py' exists -> has_env_setup=true, proceed_with_analysis=false (We can use them directly).
-2. If ONLY 'Dockerfile' or 'docker-compose.yml' exists -> has_env_setup=true (type: docker), but **proceed_with_analysis=true**. (Reason: We need to extract dependencies from Docker to create a local Conda env).
-3. If no setup files are found -> proceed_with_analysis=true.
-4. If you see 'setup.py' in the file list, favor 'pip' over 'docker'.
-"""
-
-    ENV_FILES = [
-        'environment.yml', 'environment.yaml', 'conda.yaml',
-        'requirements.txt', 'requirements-dev.txt',
-        'setup.py', 'pyproject.toml', 'Pipfile',
-        'Dockerfile'
+    # Priority order for configuration files
+    ENV_FILES_PRIORITY = [
+        'environment.yml', 'environment.yaml', 'conda.yaml',  # 1. Conda native
+        'requirements.txt', 'requirements-dev.txt',           # 2. Pip standard
+        'setup.py', 'pyproject.toml', 'Pipfile',              # 3. Python packaging
+        'Dockerfile', 'docker-compose.yml'                    # 4. Container (Last resort)
     ]
+
+    DECISION_PROMPT = """You are a Python DevOps expert. Analyze the project to choose the best environment strategy.
+
+Context:
+- Path: {current_path}
+- Files: {existing_files}
+- README Snippet: {readme_content}
+
+Goal:
+Determine if we can use existing files or need deep code analysis.
+
+Rules:
+1. If 'environment.yml' or robust 'requirements.txt' exists -> has_env_setup=true, proceed=false.
+2. If ONLY Docker files exist -> has_env_setup=true (type: docker), proceed=true (need to parse dockerfile).
+3. If no config files -> proceed=true.
+
+Output JSON:
+{{
+    "has_env_setup": boolean,
+    "env_type": "conda" | "pip" | "docker" | "poetry" | "none",
+    "env_file": "path/to/best_file" or null,
+    "proceed_with_analysis": boolean,
+    "reason": "short explanation"
+}}
+"""
 
     def __init__(self):
         self.client = OpenAI(api_key=settings.api_key)
-        self.scanner = CodeScannerAgent(output_dir="env_agent_logs")
         logger.info("DecisionAgent initialized")
 
     # ----------------------------------------------------------------
-    # 1. Main Decision Logic (with Monorepo Support)
+    # 1. Main Decision Logic
     # ----------------------------------------------------------------
-    def decide(self, input_path: str) -> Dict:
+    def decide(self, input_path: str) -> Dict[str, Any]:
+        """Main entry point for decision making."""
         logger.info(f"Analyzing project starting from: {input_path}")
         input_dir = Path(input_path).resolve()
 
-        # [STEP 1] 진짜 프로젝트 루트 찾기
-        true_root = self.scanner._find_best_project_root(input_dir)
+        # 1. Monorepo Detection (Find True Root)
+        target_directory = self._find_true_project_root(input_dir)
+        if target_directory != input_dir:
+            logger.info(f"🚀 Monorepo detected! Redirecting to: {target_directory}")
+
+        # 2. Scan for config files in the true root
+        existing_files = self._scan_env_files(target_directory)
+
+        # 3. Try Fast Track (Rule-based Decision)
+        fast_decision = self._try_fast_track_decision(existing_files, target_directory)
+        if fast_decision:
+            logger.info(f"Fast track decision: {fast_decision['reason']}")
+            return fast_decision
+
+        # 4. Fallback to LLM Decision
+        logger.info("No obvious config found. Consulting LLM...")
+        return self._ask_llm_for_decision(target_directory, existing_files)
+
+    # ----------------------------------------------------------------
+    # 2. Internal Core Logic
+    # ----------------------------------------------------------------
+    def _find_true_project_root(self, start_path: Path) -> Path:
+        """
+        Scoring algorithm to find the 'real' project root.
+        Improved: Scans deeper (depth=4) but skips junk folders for speed.
+        """
+        MAX_SCAN_DEPTH = 4 
         
-        if true_root != input_dir:
-            logger.info(f"🚀 Monorepo detected! Redirecting analysis to: {true_root}")
-            target_directory = true_root
-        else:
-            target_directory = input_dir
+        candidates = []
+        
+        IGNORED_DIRS = {
+            '.git', '.idea', '.vscode', '__pycache__', 
+            'node_modules', 'venv', 'env', '.env', 'dist', 'build'
+        }
 
-        # [STEP 2] 진짜 루트에서 파일 검사
-        existing_files = self.check_existing_env_files(str(target_directory))
+        for root, dirs, files in os.walk(start_path):
+            current = Path(root)
+            
+            dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]
 
-        # [STEP 3] Quick Decision (LLM 없이 판단)
-        for file_info in existing_files:
-            fname = file_info['name']
-            if file_info['size'] > 50:
-                if fname in ['environment.yml', 'environment.yaml', 'conda.yaml']:
-                    return self._success_response("conda", file_info['path'], target_directory)
+            try:
+                depth = len(current.relative_to(start_path).parts)
+            except ValueError:
+                continue
+
+            if depth > MAX_SCAN_DEPTH:
+                del dirs[:] 
+                continue
                 
-                # setup.py 우선순위 높음
-                if fname == 'setup.py':
-                    return self._success_response("pip", file_info['path'], target_directory, 
-                                                reason="Found setup.py. Will install via 'pip install -e .'")
+            score = 0
+            if any(f in files for f in ['setup.py', 'pyproject.toml', 'environment.yml', 'conda.yaml']):
+                score += 10
+            
+            if 'requirements.txt' in files:
+                score += 5
+            if 'src' in dirs or 'app' in dirs:
+                score += 5
 
-        # [STEP 4] LLM 판단
-        readme_content = self.read_readme(str(target_directory))
-        files_text = "\n".join([f"- {f['name']}" for f in existing_files]) if existing_files else "None"
+            if current.name.lower() in ['docs', 'tests', 'examples', 'scripts']:
+                score -= 10
+            
+            if score > 0:
+                candidates.append((score, current))
+        
+        if not candidates:
+            return start_path
+            
+        candidates.sort(key=lambda x: (-x[0], len(str(x[1]))))
+        
+        best_path = candidates[0][1]
+        
+        if best_path != start_path:
+            logger.debug(f"Root switched: {start_path} -> {best_path} (Score: {candidates[0][0]})")
+            
+        return best_path
 
+    def _scan_env_files(self, path: Path) -> List[Dict]:
+        found = []
+        for name in self.ENV_FILES_PRIORITY:
+            f = path / name
+            if f.exists():
+                found.append({"name": name, "path": str(f), "size": f.stat().st_size})
+        return found
+
+    def _try_fast_track_decision(self, files: List[Dict], target_dir: Path) -> Optional[Dict]:
+        """Returns a decision dict if a clear winner exists, else None."""
+        for f in files:
+            name = f['name']
+            if f['size'] < 10: continue  # Skip empty files
+
+            # Priority 1: Conda files (Gold Standard)
+            if name in ['environment.yml', 'environment.yaml', 'conda.yaml']:
+                return self._build_response(True, "conda", f['path'], target_dir, False, "Valid Conda environment file found.")
+            
+            # Priority 2: setup.py (Python Standard)
+            if name == 'setup.py':
+                return self._build_response(True, "pip", f['path'], target_dir, False, "Found setup.py (installable package).")
+            
+            # Priority 3: requirements.txt (Common Standard)
+            if name == 'requirements.txt':
+                return self._build_response(True, "pip", f['path'], target_dir, False, "Found requirements.txt.")
+        
+        return None
+
+    def _ask_llm_for_decision(self, target_dir: Path, files: List[Dict]) -> Dict:
+        readme = self._read_readme(target_dir)
+        files_str = "\n".join([f"- {f['name']}" for f in files]) if files else "None"
+        
         try:
             response = self.client.chat.completions.create(
                 model="gpt-4-turbo-preview",
                 messages=[
-                    {"role": "system", "content": "You are an expert Python DevOps engineer."},
                     {"role": "user", "content": self.DECISION_PROMPT.format(
-                        readme_content=readme_content[:15000] if readme_content else "No README",
-                        existing_files=files_text,
-                        current_path=target_directory.name
+                        current_path=target_dir.name,
+                        existing_files=files_str,
+                        readme_content=readme[:2000] if readme else "No README"
                     )}
                 ],
-                temperature=0.1,
+                temperature=0.0,
                 response_format={"type": "json_object"}
             )
-            
             result = json.loads(response.choices[0].message.content)
-            result['target_directory'] = str(target_directory) # 경로 정보 추가
-            
-            logger.info(f"Decision made: {result.get('reason', 'No reason provided')}")
+            result['target_directory'] = str(target_dir)
             return result
-
         except Exception as e:
-            logger.error(f"Error in LLM decision: {e}")
-            return {
-                "has_env_setup": False,
-                "proceed_with_analysis": True,
-                "target_directory": str(target_directory),
-                "reason": "Error during analysis, proceeding with fallback."
-            }
+            logger.error(f"LLM Decision failed: {e}")
+            # Safe Fallback: Just analyze everything
+            return self._build_response(False, "none", None, target_dir, True, "LLM failed, falling back to deep analysis.")
 
     # ----------------------------------------------------------------
-    # 2. Helper Methods (The missing parts restored!)
+    # 3. Helper Methods (Extraction & Utils)
     # ----------------------------------------------------------------
     def collect_env_files_content(self, project_path: str) -> str:
         """
-        Collect content from environment files for LLM analysis.
+        Collect content from environment files for the Builder to use.
+        Reads files in priority order and extracts relevant parts.
         """
         logger.info(f"Collecting content from: {project_path}")
         project_dir = Path(project_path).resolve()
         consolidated_parts = []
 
-        for env_file in self.ENV_FILES:
+        for env_file in self.ENV_FILES_PRIORITY:
             file_path = project_dir / env_file
-            if file_path.exists() and file_path.is_file():
+            
+            if file_path.exists() and file_path.stat().st_size > 0:
                 try:
-                    if file_path.stat().st_size > 0:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
+                    content = file_path.read_text(encoding='utf-8', errors='ignore')
 
-                        if env_file == 'setup.py':
-                            deps = self._extract_setup_py_deps(content)
-                            if deps:
-                                consolidated_parts.append(f"=== {env_file} (install_requires) ===\n{deps}\n")
-                        elif env_file == 'pyproject.toml':
-                            deps = self._extract_pyproject_deps(content)
-                            if deps:
-                                consolidated_parts.append(f"=== {env_file} (dependencies) ===\n{deps}\n")
-                        else:
-                            consolidated_parts.append(f"=== {env_file} ===\n{content}\n")
+                    if env_file == 'setup.py':
+                        deps = self._extract_setup_py_deps(content)
+                        if deps:
+                            consolidated_parts.append(f"=== {env_file} (install_requires) ===\n{deps}\n")
+                    
+                    elif env_file == 'pyproject.toml':
+                        deps = self._extract_pyproject_deps(content)
+                        if deps:
+                            consolidated_parts.append(f"=== {env_file} (dependencies) ===\n{deps}\n")
+                    
+                    else:
+                        consolidated_parts.append(f"=== {env_file} ===\n{content}\n")
+                        
                 except Exception as e:
                     logger.warning(f"Error reading {env_file}: {e}")
 
-        return "\n".join(consolidated_parts) if consolidated_parts else "No environment files content found."
+        return "\n".join(consolidated_parts) if consolidated_parts else ""
 
     def _extract_setup_py_deps(self, content: str) -> str:
-        """Extract install_requires from setup.py."""
+        """Extract install_requires from setup.py using regex."""
         match = re.search(r'install_requires\s*=\s*\[(.*?)\]', content, re.DOTALL)
         if match:
             deps_text = match.group(1)
@@ -171,7 +239,7 @@ CRITICAL RULES:
         return ""
 
     def _extract_pyproject_deps(self, content: str) -> str:
-        """Extract dependencies from pyproject.toml."""
+        """Extract dependencies from pyproject.toml using regex."""
         match = re.search(r'dependencies\s*=\s*\[(.*?)\]', content, re.DOTALL)
         if match:
             deps_text = match.group(1)
@@ -179,38 +247,21 @@ CRITICAL RULES:
             return '\n'.join(deps)
         return ""
 
-    def check_existing_env_files(self, project_path: str) -> List[Dict[str, str]]:
-        project_dir = Path(project_path).resolve()
-        found_files = []
-        for env_file in self.ENV_FILES:
-            file_path = project_dir / env_file
-            if file_path.exists():
-                found_files.append({
-                    "name": env_file,
-                    "path": str(file_path),
-                    "size": file_path.stat().st_size
-                })
-        return found_files
-
-    def read_readme(self, project_path: str) -> Optional[str]:
-        project_dir = Path(project_path).resolve()
-        for name in ['README.md', 'README.txt', 'README']:
-            p = project_dir / name
+    def _read_readme(self, path: Path) -> Optional[str]:
+        for n in ['README.md', 'README.txt', 'README']:
+            p = path / n
             if p.exists():
-                try:
-                    with open(p, 'r', encoding='utf-8', errors='ignore') as f:
-                        return f.read()
+                try: 
+                    return p.read_text(encoding='utf-8', errors='ignore')
                 except: pass
         return None
 
-    def _success_response(self, env_type, env_file, target_dir, reason=None):
-        if not reason:
-            reason = f"Found valid {env_type} configuration: {Path(env_file).name}"
+    def _build_response(self, has_setup, type_, file_, target, proceed, reason):
         return {
-            "has_env_setup": True,
-            "env_type": env_type,
-            "env_file": env_file,
-            "proceed_with_analysis": False,
-            "target_directory": str(target_dir),
+            "has_env_setup": has_setup,
+            "env_type": type_,
+            "env_file": file_,
+            "target_directory": str(target),
+            "proceed_with_analysis": proceed,
             "reason": reason
         }

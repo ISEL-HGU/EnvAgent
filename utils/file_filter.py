@@ -1,9 +1,12 @@
 """
-File Filter - Rule-based file filtering.
-No LLM calls, just pure Python logic to filter relevant files.
+File Filter Module
+Responsible for selecting relevant files for dependency analysis while
+excluding system files, binary data, and heavy directories (like node_modules)
+to optimize processing speed and token usage.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import List
 
@@ -11,9 +14,13 @@ logger = logging.getLogger(__name__)
 
 
 class FileFilter:
-    """Filters files to find only those relevant for dependency analysis."""
+    """
+    Filters files to find only those relevant for dependency analysis.
+    Implements 'Early Pruning' to skip unnecessary directory traversal.
+    """
 
-    # Directories to exclude from scanning
+    # Directories to completely ignore during traversal
+    # This prevents entering heavy folders like node_modules or .git
     EXCLUDE_DIRS = {
         '__pycache__', '.git', '.github', 'venv', 'env', '.venv',
         'node_modules', '.idea', '.vscode', 'dist', 'build',
@@ -21,195 +28,150 @@ class FileFilter:
         'docs', 'documentation', 'examples', 'tests', 'test',
         'assets', 'images', 'static', 'templates', 'migrations',
         '.DS_Store', 'htmlcov', 'coverage', '.coverage',
-        'wheels', 'sdist', 'var', 'instance'
+        'wheels', 'sdist', 'var', 'instance', 'public', 'lib',
+        'site-packages'
     }
 
-    # File patterns to exclude
+    # Specific filenames to ignore (configs, linters, etc.)
     EXCLUDE_FILE_PATTERNS = {
         '.gitignore', '.dockerignore', 'LICENSE', 'CHANGELOG.md',
         'CONTRIBUTING.md', 'Makefile', '.pylintrc', '.flake8',
         '.editorconfig', '.pre-commit-config.yaml', 'tox.ini',
-        'pytest.ini', '.coveragerc', 'mypy.ini'
+        'pytest.ini', '.coveragerc', 'mypy.ini', 'Procfile'
     }
 
-    # File extensions to exclude
+    # File extensions to ignore (binaries, data, logs, media)
     EXCLUDE_EXTENSIONS = {
         '.md', '.txt', '.rst', '.json', '.yaml', '.yml', '.toml',
         '.cfg', '.ini', '.sh', '.bat', '.cmd', '.ps1',
         '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico',
-        '.pdf', '.doc', '.docx', '.xls', '.xlsx',
-        '.db', '.sqlite', '.sqlite3', '.log'
+        '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.csv',
+        '.db', '.sqlite', '.sqlite3', '.log', '.css', '.js', '.html',
+        '.pyc', '.pyo', '.pyd', '.so', '.dll', '.exe', '.bin'
     }
 
-    # Only include these extensions for dependency analysis
-    INCLUDE_EXTENSIONS = {'.py'}
+    # Extensions to analyze for source code
+    # Included .ipynb for Jupyter Notebook support
+    INCLUDE_EXTENSIONS = {'.py', '.ipynb'}
 
-    # Special files to always include (dependency-related)
+    # High-priority dependency definition files
+    # These are always included regardless of other rules
     ALWAYS_INCLUDE = {
         'requirements.txt', 'requirements-dev.txt', 'requirements-test.txt',
         'setup.py', 'setup.cfg', 'pyproject.toml',
         'environment.yml', 'environment.yaml', 'conda.yaml',
-        'Pipfile', 'Pipfile.lock', 'poetry.lock'
+        'Pipfile', 'Pipfile.lock', 'poetry.lock', 'Dockerfile'
     }
 
     def __init__(self, max_file_size_kb: int = 500):
         """
-        Initialize FileFilter.
+        Initialize the file filter.
 
         Args:
-            max_file_size_kb: Maximum file size to process in KB
+            max_file_size_kb: Files larger than this (in KB) will be skipped 
+                              to avoid token limits or performance issues.
         """
         self.max_file_size_bytes = max_file_size_kb * 1024
 
-    def _should_exclude_dir(self, dir_path: Path) -> bool:
+    def _should_exclude_dir_name(self, dir_name: str) -> bool:
         """
-        Check if directory should be excluded.
-
-        Args:
-            dir_path: Directory path to check
-
-        Returns:
-            True if should exclude, False otherwise
+        Check if a directory name is in the blocklist.
         """
-        dir_name = dir_path.name.lower()
-
-        # Check against exclude list
         if dir_name in self.EXCLUDE_DIRS:
             return True
-
-        # Exclude hidden directories (except .github for workflows)
+        # Exclude hidden directories (start with .) but allow .github workflows
         if dir_name.startswith('.') and dir_name not in {'.github'}:
             return True
-
         return False
 
     def _should_include_file(self, file_path: Path) -> bool:
         """
-        Check if file should be included for analysis.
-
-        Args:
-            file_path: File path to check
-
-        Returns:
-            True if should include, False otherwise
+        Determine if a specific file should be included in analysis.
         """
         file_name = file_path.name
         file_ext = file_path.suffix.lower()
 
-        # Always include special dependency files
+        # 1. Always include priority configuration files
         if file_name in self.ALWAYS_INCLUDE:
-            logger.debug(f"Including special file: {file_name}")
             return True
 
-        # Exclude by file pattern
+        # 2. Check exclusion patterns
         if file_name in self.EXCLUDE_FILE_PATTERNS:
             return False
-
-        # Exclude by extension
         if file_ext in self.EXCLUDE_EXTENSIONS:
             return False
 
-        # Include only specific extensions
+        # 3. Check inclusion extensions (Source Code)
         if file_ext not in self.INCLUDE_EXTENSIONS:
             return False
 
-        # Check file size
+        # 4. Check file size (Skip overly large files)
         try:
             if file_path.stat().st_size > self.max_file_size_bytes:
-                logger.warning(f"Skipping large file: {file_name} ({file_path.stat().st_size / 1024:.0f} KB)")
+                logger.debug(f"Skipping large file: {file_name}")
                 return False
-        except Exception as e:
-            logger.warning(f"Could not check size of {file_name}: {e}")
+        except OSError:
+            # Handle cases where file access fails (e.g., broken symlinks)
             return False
 
         return True
 
     def get_relevant_files(self, project_path: str) -> List[Path]:
         """
-        Get all relevant files for dependency analysis.
+        Scan the project directory and return a list of relevant files.
+        Uses os.walk with in-place list modification for 'Early Pruning'.
 
         Args:
-            project_path: Root directory of the project
+            project_path: The root directory to scan.
 
         Returns:
-            List of Path objects for relevant files
+            List[Path]: A sorted list of relevant file paths.
         """
         project_dir = Path(project_path).resolve()
+        relevant_files = []
 
         if not project_dir.exists():
             logger.error(f"Project path does not exist: {project_path}")
             return []
 
-        if not project_dir.is_dir():
-            logger.error(f"Project path is not a directory: {project_path}")
-            return []
+        # Walk the directory tree
+        for root, dirs, files in os.walk(str(project_dir)):
+            # [Early Pruning Optimization]
+            # Modify 'dirs' list in-place to prevent os.walk from entering excluded directories.
+            # This significantly speeds up scanning by skipping node_modules, .git, etc.
+            dirs[:] = [d for d in dirs if not self._should_exclude_dir_name(d)]
 
-        relevant_files = []
-
-        # Walk through directory tree
-        for item in project_dir.rglob("*"):
-            try:
-                # Skip if it's a directory
-                if item.is_dir():
+            for file in files:
+                file_path = Path(root) / file
+                
+                try:
+                    if self._should_include_file(file_path):
+                        relevant_files.append(file_path)
+                except Exception as e:
+                    logger.warning(f"Error checking file {file}: {e}")
                     continue
 
-                # Check if file is in an excluded directory
-                is_in_excluded_dir = any(
-                    self._should_exclude_dir(parent)
-                    for parent in item.parents
-                    if parent != project_dir
-                )
-
-                if is_in_excluded_dir:
-                    continue
-
-                # Check if file should be included
-                if self._should_include_file(item):
-                    relevant_files.append(item)
-
-            except (PermissionError, OSError) as e:
-                logger.warning(f"Cannot access {item}: {e}")
-                continue
-
-        # Sort by file type priority: dependency files first, then .py files
+        # Sort files to prioritize dependency definitions
+        # Order: 
+        # 0. Dependency Files (requirements.txt, setup.py)
+        # 1. Python Source Files (.py, .ipynb)
+        # 2. Others
         def sort_key(path: Path) -> tuple:
-            # Priority 0: dependency definition files
             if path.name in self.ALWAYS_INCLUDE:
                 return (0, path.name)
-            # Priority 1: Python files
             elif path.suffix == '.py':
                 return (1, str(path))
-            # Priority 2: others
             else:
                 return (2, str(path))
 
         relevant_files.sort(key=sort_key)
 
-        logger.info(f"Found {len(relevant_files)} relevant files in {project_path}")
+        logger.info(f"FileFilter: Found {len(relevant_files)} relevant files in {project_path}")
         return relevant_files
 
     def get_dependency_files(self, project_path: str) -> List[Path]:
         """
-        Get only dependency definition files.
-
-        Args:
-            project_path: Root directory of the project
-
-        Returns:
-            List of Path objects for dependency files
+        Helper to retrieve only dependency definition files.
         """
         all_files = self.get_relevant_files(project_path)
         return [f for f in all_files if f.name in self.ALWAYS_INCLUDE]
-
-    def get_python_files(self, project_path: str) -> List[Path]:
-        """
-        Get only Python source files.
-
-        Args:
-            project_path: Root directory of the project
-
-        Returns:
-            List of Path objects for .py files
-        """
-        all_files = self.get_relevant_files(project_path)
-        return [f for f in all_files if f.suffix == '.py']

@@ -8,7 +8,7 @@ Environment Builder Agent (OS-Aware & Absolute Path).
 import logging
 import re
 import yaml
-import platform  # 👈 [New] OS 확인을 위해 추가
+import platform  
 from pathlib import Path
 from typing import Optional, Tuple, Any, Dict
 
@@ -24,7 +24,7 @@ class EnvironmentBuilder:
     """Builds a Conda environment.yml file from analysis results."""
 
     # ------------------------------------------------------------------
-    # 🧠 PROMPT FOR SUMMARY (Mac/Linux 대응 추가)
+    # 🧠 PROMPT FOR SUMMARY 
     # ------------------------------------------------------------------
     BUILD_FROM_SUMMARY_PROMPT = """
 You are a Senior DevOps Engineer.
@@ -224,10 +224,9 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
             return yaml_content
 
     # ----------------------------
-    # Helper: Inference Logic (OS 감지 추가됨!)
+    # Helper: Inference Logic 
     # ----------------------------
     def _infer_cuda(self, summary_content: str) -> str:
-        # [New] OS가 Mac(Darwin)이면 CUDA를 강제로 끕니다.
         if platform.system() == "Darwin":
             logger.info("🍎 macOS detected! Skipping CUDA requirements.")
             return "None (macOS detected - CUDA not supported, uses MPS/CPU)"
