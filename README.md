@@ -119,27 +119,6 @@ EnvAgent uses a 6-step pipeline to generate environments:
 
 ---
 
-## Citation
-
-If you use EnvAgent in your research, please cite:
-
-```bibtex
-@software{envagent2024,
-  title = {EnvAgent: AI-Powered Conda Environment Generator},
-  author = {Your Name},
-  year = {2024},
-  url = {https://github.com/yourusername/EnvAgent}
-}
-```
-
----
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
 ## Documentation
 
 - [FLOW_ARCHITECTURE.md](FLOW_ARCHITECTURE.md) - Detailed system architecture and data flow
