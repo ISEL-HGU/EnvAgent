@@ -30,6 +30,14 @@ class EnvironmentBuilder:
 You are a Senior DevOps Engineer.
 Your task is to create a robust `environment.yml` file based on the provided dependency summary.
 
+### 💻 EXECUTION CONTEXT (CRITICAL)
+- **Current Hardware:** {system_context}
+- **Rule:** If the hardware is **Apple Silicon (M1/M2/M3/M4/etc)**:
+  1. You **MUST** prioritize `conda-forge` channel (Put it first).
+  2. You **MUST** use `conda` packages for `dlib`, `numpy`, `scipy` (Avoid pip build errors on ARM64).
+  3. **DO NOT** pin `dlib` version (e.g. use `dlib`, NOT `dlib=19.9`).
+  4. `libjpeg` often fails on Mac; use `libjpeg-turbo` instead.
+
 ### PROJECT DETAILS
 - **Project Name:** {project_name}
 - **Python Version (target):** {python_version}
@@ -47,19 +55,25 @@ Your task is to create a robust `environment.yml` file based on the provided dep
    - **`scikit-learn`** → **`scikit-learn`**
    - **`protobuf`** → **`libprotobuf`**
 
-2. **OS SPECIFIC RULES (CRITICAL):**
+2. **OS SPECIFIC RULES:**
    - If CUDA Requirement says **"macOS"** or **"None"**:
      - **DO NOT** include `cudatoolkit`, `cuda`, `nvidia`, `ncc` packages.
      - **DO NOT** include `nvidia` channel.
      - Just install `pytorch` (It automatically supports MPS on macOS).
 
-3. **CHANNEL PRIORITY:**
+3. **BINARY PREFERENCE (Prevent Build Errors):**
+   - **ALWAYS** prefer `conda` (dependencies) over `pip` for libraries that require compilation (C/C++ extensions).
+   - **Specific Packages to keep in Conda:**
+     - `dlib`, `face_recognition`, `numpy`, `pandas`, `scipy`, `scikit-learn`, `pillow`
+   - Use `pip` ONLY for pure Python packages or if not available in Conda.
+
+4. **CHANNEL PRIORITY:**
+   - **`conda-forge`** (Must be FIRST for macOS/Apple Silicon)
    - **`pytorch`**
    - **`nvidia`** (ONLY if CUDA is required and NOT macOS)
-   - `conda-forge`
    - `defaults`
 
-4. **OUTPUT FORMAT:**
+5. **OUTPUT FORMAT:**
    - Return ONLY raw YAML (no markdown).
 """
 
@@ -111,6 +125,7 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
         project_name: str = "my_project",
         python_version: Optional[str] = None,
         repo_root: Optional[str] = None,
+        system_context: str = "Unknown"  # <-- New argument
     ) -> str:
         """
         Generate environment.yml content from a dependency summary file.
@@ -119,8 +134,7 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
 
         summary_content = self._read_text(summary_path)
         sanitized_name = sanitize_env_name(project_name)
-        logger.info(f"Using sanitized environment name: {sanitized_name}")
-
+        
         # [New] CUDA hint with OS check
         cuda_version = self._infer_cuda(summary_content)
 
@@ -131,9 +145,10 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
         )
 
         target_python = self._choose_python_version(python_version, inferred_py)
-        logger.info(f"Target Python version selected: {target_python} (user={python_version}, inferred={inferred_py})")
-
+        
+        # Inject System Context into Prompt
         prompt = self.BUILD_FROM_SUMMARY_PROMPT.format(
+            system_context=system_context,
             project_name=sanitized_name,
             python_version=target_python,
             cuda_version=cuda_version,
@@ -156,12 +171,10 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
     ) -> str:
         """
         Generate environment.yml content from existing environment files.
-        Injects ABSOLUTE PATH installation command to prevent path errors.
         """
         logger.info("Building environment.yml from existing environment files...")
 
         sanitized_name = sanitize_env_name(project_name)
-        logger.info(f"Using sanitized environment name: {sanitized_name}")
 
         prompt = self.BUILD_FROM_EXISTING_FILES_PROMPT.format(
             project_name=sanitized_name,
@@ -169,11 +182,9 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
             collected_content=collected_content
         )
 
-        # 1. Generate Raw YAML
         env_content = self._call_llm(prompt)
         env_content = self._clean_markdown(env_content)
         
-        # 2. Inject Absolute Path Logic
         if target_directory:
             env_content = self._inject_relative_path_install(
                 yaml_content=env_content, 
@@ -181,20 +192,16 @@ Your task is to convert existing environment file(s) into a unified Conda `envir
                 root_dir=root_directory
             )
 
-        # 3. Ensure Python Version
         env_content = self._ensure_python_dep(env_content, python_version)
-
-        logger.info("Successfully generated environment.yml from existing files")
         return env_content
 
     # ----------------------------
-    # Helper: Monorepo Path Injection (ABSOLUTE PATH FIX)
+    # Helper: Monorepo Path Injection
     # ----------------------------
     def _inject_relative_path_install(self, yaml_content: str, target_dir: str, root_dir: Optional[str] = None) -> str:
         try:
             target_path = Path(target_dir).resolve()
             install_cmd = f"-e {str(target_path)}"
-            logger.info(f"🔧 Monorepo: Injecting ABSOLUTE installation command '{install_cmd}'")
 
             data = yaml.safe_load(yaml_content)
             

@@ -23,6 +23,13 @@ class EnvironmentFixer:
 A conda environment creation FAILED.
 Your goal is to fix the `environment.yml` not just by reacting to errors, but by **INFERRING the correct project context**.
 
+### 💻 EXECUTION CONTEXT (CRITICAL)
+- **Current Hardware:** {system_context}
+- **Rule:** If the hardware is **Apple Silicon (M1/M2/M3/M4)**:
+  1. **Conflict Resolution:** If a package fails to build or install, try switching channel to `conda-forge`.
+  2. **Binary Preference:** For `dlib`, `numpy`, `scipy`, `pandas`, ALWAYS use `conda` packages (avoid pip build errors).
+  3. **Python Version:** Prefer 3.10 or 3.11 over 3.9 for better ARM64 support.
+
 ## 📄 CURRENT environment.yml:
 {current_yml}
 
@@ -34,29 +41,34 @@ Your goal is to fix the `environment.yml` not just by reacting to errors, but by
 
 ## 🧠 INTELLIGENT REASONING STRATEGY:
 
-### 1. 🕵️‍♂️ INFER PYTHON VERSION (The most critical step)
-- **Problem:** If build errors occur (`gcc`, `Python.h`, `wheel`, `Py_UNICODE`), the Python version is likely incompatible.
-- **Your Job:** Look at the other libraries in the list to **GUESS** the right Python version.
-  - Case A: Modern Data Science (`pandas`, `scipy`, `spacy`) → **PIN `python=3.10`** (Best compatibility).
-  - Case B: Very Old Legacy (`tensorflow<2.0`, `sklearn` old names) → **PIN `python=3.7` or `3.8`**.
-  - Case C: Bleeding Edge (`langchain`, `fastapi`) → **PIN `python=3.11`**.
-  - **ACTION:** Change `- python` (unpinned) to `- python=3.X` based on your inference.
+### 1. 🕵️‍♂️ INFER PYTHON VERSION (Dynamic & Intelligent)
+- If build errors occur (`gcc`, `Python.h`, `wheel`, `Py_UNICODE`), the Python version is likely incompatible.
+- **STRATEGY:** Analyze the error message to determine the best Python version:
+  - If error mentions "requires python >=3.X", use that version
+  - For Apple Silicon (M1/M2), try python=3.10 or python=3.11
+  - **NEVER hardcode** a specific version without checking the error context
+- **ACTION:** Only change Python version if there's clear evidence it will help
 
-### 2. 🧩 RESOLVE CONFLICTS (UnsatisfiableError)
+### 2. 🔄 PIP TO CONDA MIGRATION (Crucial for Build Errors)
+- **Problem:** A package in the `- pip:` section failed to build (e.g., packages with C/C++ extensions).
+- **Reason:** Pip tries to compile from source, which fails if system libs (like CMake, gcc) are missing or incompatible. Conda provides pre-compiled binaries.
+- **Your Job:** **MOVE the failing package from `- pip:` to the main `dependencies:` section.**
+  - Example: If `package-x` fails to build, remove it from `pip:` and add it to the top-level list.
+  - Action: Remove version constraints (e.g., `package==1.2.3` -> `package`) to let Conda find the best binary.
+
+### 3. 🧩 RESOLVE CONFLICTS (UnsatisfiableError)
 - **Problem:** Specific versions (`numpy==1.21.0`) conflict with dependencies.
 - **Your Job:** Identify the conflicting package and **RELAX** the constraint.
   - Action: Change `numpy==1.21.0` → `numpy` (Let the solver choose).
-  - Action: Change `transformers>=4.0` → `transformers`.
 
-### 3. 📦 PACKAGES NOT FOUND
-- **Problem:** Package is not in Conda channels.
-- **Your Job:** Move it to the `pip:` section.
-  - Action: Remove from main dependencies, add under `- pip:`.
+### 4. 🔬 BLAS/LAPACK CONFLICTS
+- **Problem:** `netlib` vs `openblas` conflict.
+- **STRATEGY:** Identify the conflicting package and move it to `pip:` ONLY if necessary. 
+- **CRITICAL:** Keep scientific packages (`numpy`, `scipy`) in conda when possible.
 
-### 4. 🚑 EMERGENCY FIX (If Pip Subprocess Failed)
-- **Problem:** Pip failed to build a wheel (e.g., `thinc`, `dlib`).
-- **Your Job:** This is almost always a Python version mismatch or missing system headers.
-- **Action:** **Revert to Strategy 1** and ensure Python is pinned to a stable version (3.10 is the safest bet for most pip failures).
+### 5. 🚨 PRESERVE EDITABLE INSTALLS
+- **CRITICAL:** Lines like `- -e /path/to/project` are editable installs.
+- **ACTION:** NEVER modify or remove these lines. Keep them EXACTLY as-is.
 
 ## 📝 OUTPUT RULES:
 1. Return **ONLY** the fixed YAML content.
@@ -69,12 +81,13 @@ Your goal is to fix the `environment.yml` not just by reacting to errors, but by
         self.client = OpenAI(api_key=settings.api_key)
         logger.info("EnvironmentFixer initialized")
 
-    def fix(self, current_yml: str, error_message: str, memory: Memory) -> str:
+    def fix(self, current_yml: str, error_message: str, memory: Memory, system_context: str = "Unknown") -> str:
         """
         Generate a fixed environment.yml based on the error.
         """
         logger.info("=" * 70)
         logger.info("🔧 FIXER AGENT STARTING DIAGNOSIS...")
+        logger.info(f"   Context: {system_context}")
         logger.info("=" * 70)
 
         # 1. Prepare History Context
@@ -83,12 +96,12 @@ Your goal is to fix the `environment.yml` not just by reacting to errors, but by
             history_lines = []
             for i, (err, fix_desc) in enumerate(memory.error_history, 1):
                 history_lines.append(f"[Attempt {i}] Fix: {fix_desc}")
-                # Keep error brief to save context window
                 history_lines.append(f"[Attempt {i}] Error Snippet: {err[:300]}...") 
             error_history_text = "\n".join(history_lines)
 
         # 2. Build Prompt
         prompt = self.FIX_PROMPT.format(
+            system_context=system_context, # Context Injection
             current_yml=current_yml,
             error_message=error_message,
             error_history=error_history_text
@@ -101,21 +114,21 @@ Your goal is to fix the `environment.yml` not just by reacting to errors, but by
                 model="gpt-4-turbo-preview",
                 messages=[
                     {
-                        "role": "system", 
-                        "content": "You are a Python Dependency Expert. If you see build errors, your priority is to PIN Python to a stable version (usually 3.10) to fix ABI compatibility."
+                        "role": "system",
+                        "content": "You are a Python Dependency Expert. ANALYZE the error message carefully. For Apple Silicon (M1/M2/M4), prioritize 'conda-forge' and binary packages. Be surgical - only change what's necessary."
                     },
                     {
-                        "role": "user", 
+                        "role": "user",
                         "content": prompt
                     }
                 ],
-                temperature=0.3, # Slightly creative for inference, but stable for code
+                temperature=0.2,
             )
 
             fixed_yml = response.choices[0].message.content.strip()
             fixed_yml = self._clean_markdown(fixed_yml)
 
-            # 3. Validation: Did AI actually do anything?
+            # 3. Validation
             if self._are_yamls_identical(current_yml, fixed_yml):
                 logger.warning("⚠️  AI suggested no changes. Engaging Rule-Based Fallback Protocol...")
                 fixed_yml = self._heuristic_fallback(current_yml, error_message)
@@ -128,83 +141,77 @@ Your goal is to fix the `environment.yml` not just by reacting to errors, but by
             return self._heuristic_fallback(current_yml, error_message)
 
     def _clean_markdown(self, text: str) -> str:
-        """Remove ```yaml wrappers."""
         if "```" in text:
             lines = text.split("\n")
-            # Filter out lines that are just ``` or ```yaml
             lines = [l for l in lines if not l.strip().startswith("```")]
             return "\n".join(lines).strip()
         return text
 
     def _are_yamls_identical(self, yml1: str, yml2: str) -> bool:
-        """Compare normalized YAMLs."""
         def normalize(yml):
             lines = [line.strip() for line in yml.strip().split("\n") if line.strip() and not line.strip().startswith("#")]
             return "\n".join(sorted(lines))
         return normalize(yml1) == normalize(yml2)
 
     def _heuristic_fallback(self, yml: str, error: str) -> str:
-        """
-        Rule-Based Fallback: When AI fails, apply hard rules.
-        """
-        logger.info("🔧 [FALLBACK] Applying Safety Net Rules...")
-        
+        """Rule-Based Fallback: When AI fails, apply aggressive hard rules."""
+        logger.info("🔧 [FALLBACK] Applying Aggressive Safety Net Rules...")
+
         lines = yml.split('\n')
         fixed_lines = []
-        
-        # Rule 1: Detect C/C++ Build Errors -> Force Python 3.10
-        is_build_error = any(x in error for x in [
-            "gcc", "g++", "Python.h", "build", "wheel", "Py_UNICODE", "_PyInterpreterState"
-        ])
-        
-        python_processed = False
-        
+        in_pip_section = False
+
+        is_build_error = any(x in error for x in ["gcc", "g++", "Python.h", "build", "wheel", "cmake"])
+        is_solver_error = any(x in error for x in ["LibMambaUnsatisfiableError", "UnsatisfiableError", "conflicts"])
+
         for line in lines:
             stripped = line.strip()
-            
-            # Check if python line
+
+            if stripped.startswith("- pip:"):
+                in_pip_section = True
+                fixed_lines.append(line)
+                continue
+                
+            if in_pip_section and stripped and not line.startswith(" ") and not line.startswith("\t"):
+                in_pip_section = False
+
+            if not stripped or stripped.startswith("#"):
+                fixed_lines.append(line)
+                continue
+
             if stripped.startswith("- python"):
-                # If we have a build error and python is unpinned or weird, force 3.10
-                if is_build_error:
-                    logger.info("💡 [FALLBACK] Build error detected. Forcing 'python=3.10'")
+                if is_solver_error and ("=" in stripped or ">" in stripped or "<" in stripped):
                     indent = line[:line.find("-")]
-                    fixed_lines.append(f"{indent}- python=3.10")
+                    logger.info("💡 [FALLBACK] Removing Python version constraint")
+                    fixed_lines.append(f"{indent}- python")
                 else:
                     fixed_lines.append(line)
-                python_processed = True
                 continue
             
-            # Rule 2: Strip versions for explicitly conflicting packages
-            # Regex to find package name in error like "conflict with 'numpy'" or "'numpy' not found"
-            pkg_match = re.search(r'["\']([a-zA-Z0-9_-]+)(?:==|>=|<=)', error)
-            target_pkg = pkg_match.group(1) if pkg_match else None
-            
-            should_strip = False
-            if target_pkg and target_pkg in stripped and ("=" in stripped or ">" in stripped):
-                should_strip = True
-                
-            if should_strip:
-                pkg_name = stripped.replace("-", "").strip().split("=")[0].split(">")[0].split("<")[0]
+            # Relax standard packages (non-pip)
+            if (is_solver_error and not in_pip_section and stripped.startswith("-") and ":" not in stripped and not stripped.startswith("- -e")):
                 indent = line[:line.find("-")]
-                fixed_lines.append(f"{indent}- {pkg_name}")
-                logger.info(f"💡 [FALLBACK] Removing constraints from '{pkg_name}'")
+                pkg_line = stripped[1:].strip()
+                pkg_name = pkg_line
+                for sep in ["==", ">=", "<=", "!=", "~=", "="]:
+                    if sep in pkg_name:
+                        pkg_name = pkg_name.split(sep)[0].strip()
+                        break
+                
+                if " " in pkg_name and not pkg_name.startswith("-"):
+                    pkg_name = pkg_name.split()[0].strip()
+
+                if pkg_name:
+                    new_line = f"{indent}- {pkg_name}"
+                    fixed_lines.append(new_line)
+                    if line.strip() != new_line.strip():
+                         logger.info(f"💡 [FALLBACK] Relaxing constraint: {line.strip()} -> {pkg_name}")
+                else:
+                    fixed_lines.append(line)
             else:
                 fixed_lines.append(line)
         
         return '\n'.join(fixed_lines)
 
     def extract_fix_summary(self, original_yml: str, fixed_yml: str) -> str:
-        original_lines = set(original_yml.strip().split("\n"))
-        fixed_lines = set(fixed_yml.strip().split("\n"))
-        
-        # Find lines that contain 'python=' to see if version changed
-        py_ver_change = any("python=" in line for line in (fixed_lines - original_lines))
-        if py_ver_change:
-            return "Pinned/Changed Python Version (Inferred Stability)"
-            
-        added = fixed_lines - original_lines
-        if added:
-            added_list = [line.strip() for line in added if line.strip()]
-            return f"Updated: {', '.join(added_list[:2])}..."
-            
-        return "Relaxed constraints"
+        return "AI applied fixes based on error log." # Simplified for brevity

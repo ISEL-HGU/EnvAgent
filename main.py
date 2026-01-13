@@ -9,7 +9,6 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
 
 # Config & Utils
 from config.settings import settings
@@ -51,15 +50,23 @@ def validate_directory(path_str: str) -> Path:
 
 # --- Core Phases ---
 
-def run_system_check() -> None:
-    """Step 0: Pre-flight system validation."""
+def run_system_check() -> str:
+    """
+    Step 0: Pre-flight system validation.
+    Returns: The detected system context string (e.g., 'macOS (arm64) - Apple M4').
+    """
     print("🔍 Step 0/6: Checking system requirements...")
     checker = SystemChecker()
-    passed, msgs = checker.run_all_checks()
+    passed, msgs, system_info = checker.run_all_checks()
+    
+    for msg in msgs:
+        print(f"   {msg}")
+
     if not passed:
         print("❌ System check failed.")
         sys.exit(1)
-    print("   ✓ System checks passed\n")
+    
+    return system_info
 
 def analyze_structure(root_path: Path) -> dict:
     """Step 1: Determine project structure (Monorepo detection)."""
@@ -100,7 +107,7 @@ def process_existing_files(decision: dict, project_name: str, py_version: str, r
     print(f"   ✓ Saved to: {output_path}")
     return env_content
 
-def process_deep_analysis(target_dir: Path, output_dir: Path, project_name: str, py_version: str, output_path: Path) -> str:
+def process_deep_analysis(target_dir: Path, output_dir: Path, project_name: str, py_version: str, output_path: Path, system_context: str) -> str:
     """Case B: Deep scan of source code."""
     print(f"\n   ✓ Proceeding with code analysis in: {target_dir.name}")
 
@@ -127,19 +134,20 @@ def process_deep_analysis(target_dir: Path, output_dir: Path, project_name: str,
         summary_path=str(summary_path),
         project_name=project_name,
         python_version=py_version,
-        repo_root=str(target_dir)
+        repo_root=str(target_dir),
+        system_context=system_context  # <-- Pass hardware info (Apple M4 context)
     )
     builder.save_to_file(env_content, str(output_path))
     print(f"   ✓ Saved to: {output_path}")
     return env_content
 
-def create_environment_with_retry(env_name: str, output_path: Path, initial_yml: str) -> None:
+def create_environment_with_retry(env_name: str, output_path: Path, initial_yml: str, system_context: str) -> None:
     """Step 5: Create environment with self-healing loop."""
     print(f"\n🚀 Step 5/6: Creating conda environment '{env_name}'...")
     
     executor = CondaExecutor()
     fixer = EnvironmentFixer()
-    builder = EnvironmentBuilder() # For saving fixed YAML
+    builder = EnvironmentBuilder()
 
     if executor.environment_exists(env_name):
         print(f"   ⚠️  Removing existing environment...")
@@ -159,9 +167,8 @@ def create_environment_with_retry(env_name: str, output_path: Path, initial_yml:
             print("✅ SUCCESS! Environment created.")
             print("=" * 60)
             print(f"Activate: conda activate {env_name}")
-            return # Success exit
+            return 
 
-        # Failure Handling
         print(f"   ❌ Failed: {error[:200]}...")
         if attempt == settings.MAX_RETRIES:
             print("❌ Final failure: Max retries reached.")
@@ -169,13 +176,15 @@ def create_environment_with_retry(env_name: str, output_path: Path, initial_yml:
             
         print(f"   🔧 Applying fix...")
         memory.error_history = error_history
-        
+
         try:
-            fixed_yml = fixer.fix(current_yml, error, memory)
+            # Pass system_context to Fixer so it knows we are on M4
+            fixed_yml = fixer.fix(current_yml, error, memory, system_context=system_context)
             builder.save_to_file(fixed_yml, str(output_path))
             
+            fix_summary = fixer.extract_fix_summary(current_yml, fixed_yml)
             current_yml = fixed_yml
-            error_history.append((error, "Applied fix"))
+            error_history.append((error, fix_summary))
         except Exception as e:
             print(f"❌ Fixer crashed: {e}")
             sys.exit(1)
@@ -196,8 +205,8 @@ def main() -> None:
     output_path = Path(args.destination).resolve()
     os.makedirs(output_path.parent, exist_ok=True)
     
-    # Run Pipeline
-    run_system_check()
+    # 1. Run System Check & Capture Hardware Context
+    system_context = run_system_check()
     
     decision = analyze_structure(root_path)
     target_dir = decision['target_path_obj']
@@ -205,15 +214,24 @@ def main() -> None:
     project_name = args.env_name if args.env_name else root_path.name
     sanitized_name = sanitize_env_name(project_name)
     
-    # Generate YAML Content
+    # 2. Generate YAML Content
     if decision["has_env_setup"] and not decision["proceed_with_analysis"]:
         env_content = process_existing_files(decision, project_name, args.python_version, root_path, output_path)
     else:
-        env_content = process_deep_analysis(target_dir, output_path.parent, sanitized_name, args.python_version, output_path)
+        # Pass system_context to deep analysis (Builder Agent)
+        env_content = process_deep_analysis(
+            target_dir=target_dir, 
+            output_dir=output_path.parent, 
+            project_name=sanitized_name, 
+            py_version=args.python_version, 
+            output_path=output_path, 
+            system_context=system_context
+        )
     
-    # Create Environment
+    # 3. Create Environment
     if not args.no_create:
-        create_environment_with_retry(sanitized_name, output_path, env_content)
+        # Pass system_context to Fixer Agent
+        create_environment_with_retry(sanitized_name, output_path, env_content, system_context)
     else:
         print("\n✅ Skipped creation (--no-create).")
         print(f"Run: conda env create -f {output_path}")
