@@ -29,6 +29,8 @@ conda activate your_project_name
 ## Features
 
 - **Smart Dependency Detection** - Combines AST parsing with config file analysis for accurate results
+- **Active Hardware Detection** - Detects NVIDIA GPU vs Apple Silicon and optimizes accordingly
+- **Smart Warnings** - Alerts you if your hardware (e.g., Mac) doesn't match project requirements (e.g., CUDA)
 - **Monorepo Support** - Automatically identifies the correct project root in complex repositories
 - **Self-Healing** - Fixes installation errors automatically (up to 8 retries with GPT-4)
 - **Platform-Aware** - Excludes incompatible packages (e.g., CUDA on macOS)
@@ -107,7 +109,7 @@ EnvAgent uses a 6-step pipeline to generate environments:
   <img src="architecture.png" alt="EnvAgent Architecture" width="100%">
 </p>
 
-1. **System Check** - Validates Conda, Python, and disk space
+1. **System Check** - Validates Python, Conda, and **Active GPU Hardware** (NVIDIA/Apple Silicon)
 2. **Decision Agent** - Detects monorepos and chooses analysis strategy
 3. **File Filter** - Selects relevant Python files and config files
 4. **Code Scanner** - Extracts dependencies using AST parsing + config analysis
